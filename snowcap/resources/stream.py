@@ -22,12 +22,36 @@ class StreamType(ParseableEnum):
 @dataclass(unsafe_hash=True)
 class _TableStream(ResourceSpec):
     name: ResourceName
-    on_table: Table
+    # Snowflake's ALTER STREAM has no syntax for changing a stream's source -- it only
+    # supports SET/UNSET COMMENT and TAG. A changed on_table has to replace the stream,
+    # which resets its offset: any change the stream captured but a consumer hasn't read
+    # yet is lost, and the new stream starts tracking from its creation.
+    on_table: Table = field(
+        metadata={
+            "triggers_replacement": True,
+            "replacement_message": (
+                "Snowflake's ALTER STREAM cannot change a stream's source. Replacing the "
+                "stream resets its offset, so any unread changes are lost. Remove the stream "
+                "from config, apply, then add it back with the new on_table."
+            ),
+        }
+    )
     owner: RoleRef = "SYSADMIN"
     copy_grants: bool = field(default=None, metadata={"fetchable": False})
     at: dict[str, str] = field(default=None, metadata={"fetchable": False})
     before: dict[str, str] = field(default=None, metadata={"fetchable": False})
-    append_only: bool = False
+    # Also fixed at creation -- ALTER STREAM has no way to flip append-only mode either.
+    append_only: bool = field(
+        default=False,
+        metadata={
+            "triggers_replacement": True,
+            "replacement_message": (
+                "Snowflake fixes a stream's append-only mode at creation; ALTER STREAM cannot "
+                "change it. Remove the stream from config, apply, then add it back with the "
+                "new append_only."
+            ),
+        },
+    )
     show_initial_rows: bool = field(default=None, metadata={"fetchable": False})
     comment: str = None
 
@@ -44,17 +68,24 @@ class TableStream(NamedResource, Resource):
     Description:
         Represents a stream on a table in Snowflake, which allows for change data capture on the table.
 
+        Snowflake's ALTER STREAM only supports SET/UNSET COMMENT and TAG; it has no way to
+        change the stream's source, so changing on_table (or append_only,
+        which is likewise fixed at creation) marks the plan for replacement instead of
+        emitting an ALTER. Replacing a stream resets its offset: any change it captured but
+        a consumer hasn't yet read is lost, and the new stream starts tracking from its
+        creation. Drain downstream consumers of the old stream before applying a replacement.
+
     Snowflake Docs:
         https://docs.snowflake.com/en/sql-reference/sql/create-stream
 
     Fields:
         name (string, required): The name of the stream.
-        on_table (string, required): The name of the table the stream is based on.
+        on_table (string, required): The name of the table the stream is based on. Changing this replaces the stream (see above).
         owner (string or Role): The role that owns the stream. Defaults to "SYSADMIN".
         copy_grants (bool): Whether to copy grants from the source table to the stream.
         at (dict): A dictionary specifying the point in time for the stream to start, using keys like TIMESTAMP, OFFSET, STATEMENT, or STREAM.
         before (dict): A dictionary specifying the point in time for the stream to start, similar to 'at' but defining a point before the specified time.
-        append_only (bool): If set to True, the stream records only append operations.
+        append_only (bool): If set to True, the stream records only append operations. Fixed at creation; changing this replaces the stream.
         show_initial_rows (bool): If set to True, the stream includes the initial rows of the table at the time of stream creation.
         comment (string): An optional description for the stream.
 
@@ -140,12 +171,36 @@ class TableStream(NamedResource, Resource):
 @dataclass(unsafe_hash=True)
 class _DynamicTableStream(ResourceSpec):
     name: ResourceName
-    on_dynamic_table: DynamicTable
+    # Snowflake's ALTER STREAM has no syntax for changing a stream's source -- it only
+    # supports SET/UNSET COMMENT and TAG. A changed on_dynamic_table has to replace the
+    # stream, which resets its offset: any change the stream captured but a consumer
+    # hasn't read yet is lost, and the new stream starts tracking from its creation.
+    on_dynamic_table: DynamicTable = field(
+        metadata={
+            "triggers_replacement": True,
+            "replacement_message": (
+                "Snowflake's ALTER STREAM cannot change a stream's source. Replacing the "
+                "stream resets its offset, so any unread changes are lost. Remove the stream "
+                "from config, apply, then add it back with the new on_dynamic_table."
+            ),
+        }
+    )
     owner: RoleRef = "SYSADMIN"
     copy_grants: bool = field(default=None, metadata={"fetchable": False})
     at: dict[str, str] = field(default=None, metadata={"fetchable": False})
     before: dict[str, str] = field(default=None, metadata={"fetchable": False})
-    append_only: bool = False
+    # Also fixed at creation -- ALTER STREAM has no way to flip append-only mode either.
+    append_only: bool = field(
+        default=False,
+        metadata={
+            "triggers_replacement": True,
+            "replacement_message": (
+                "Snowflake fixes a stream's append-only mode at creation; ALTER STREAM cannot "
+                "change it. Remove the stream from config, apply, then add it back with the "
+                "new append_only."
+            ),
+        },
+    )
     show_initial_rows: bool = field(default=None, metadata={"fetchable": False})
     comment: str = None
 
@@ -163,17 +218,25 @@ class DynamicTableStream(NamedResource, Resource):
         Represents a stream on a dynamic table in Snowflake, capturing change data on the
         dynamic table as it refreshes.
 
+        Snowflake's ALTER STREAM only supports SET/UNSET COMMENT and TAG; it has no way to
+        change the stream's source, so changing on_dynamic_table (or
+        append_only, which is likewise fixed at creation) marks the plan for replacement
+        instead of emitting an ALTER. Replacing a stream resets its offset: any change it
+        captured but a consumer hasn't yet read is lost, and the new stream starts tracking
+        from its creation. Drain downstream consumers of the old stream before applying a
+        replacement.
+
     Snowflake Docs:
         https://docs.snowflake.com/en/sql-reference/sql/create-stream
 
     Fields:
         name (string, required): The name of the stream.
-        on_dynamic_table (string, required): The name of the dynamic table the stream is based on.
+        on_dynamic_table (string, required): The name of the dynamic table the stream is based on. Changing this replaces the stream (see above).
         owner (string or Role): The role that owns the stream. Defaults to "SYSADMIN".
         copy_grants (bool): Whether to copy grants from the source dynamic table to the stream.
         at (dict): A dictionary specifying the point in time for the stream to start, using keys like TIMESTAMP, OFFSET, STATEMENT, or STREAM.
         before (dict): A dictionary specifying the point in time for the stream to start, similar to 'at' but defining a point before the specified time.
-        append_only (bool): If set to True, the stream records only append operations.
+        append_only (bool): If set to True, the stream records only append operations. Fixed at creation; changing this replaces the stream.
         show_initial_rows (bool): If set to True, the stream includes the initial rows of the dynamic table at the time of stream creation.
         comment (string): An optional description for the stream.
 
@@ -313,7 +376,20 @@ class DynamicTableStream(NamedResource, Resource):
 @dataclass(unsafe_hash=True)
 class _StageStream(ResourceSpec):
     name: ResourceName
-    on_stage: str
+    # Snowflake's ALTER STREAM has no syntax for changing a stream's source -- it only
+    # supports SET/UNSET COMMENT and TAG. A changed on_stage has to replace the stream,
+    # which resets its offset: any change the stream captured but a consumer hasn't read
+    # yet is lost, and the new stream starts tracking from its creation.
+    on_stage: str = field(
+        metadata={
+            "triggers_replacement": True,
+            "replacement_message": (
+                "Snowflake's ALTER STREAM cannot change a stream's source. Replacing the "
+                "stream resets its offset, so any unread changes are lost. Remove the stream "
+                "from config, apply, then add it back with the new on_stage."
+            ),
+        }
+    )
     owner: RoleRef = "SYSADMIN"
     copy_grants: bool = field(default=None, metadata={"fetchable": False})
     comment: str = None
@@ -324,12 +400,19 @@ class StageStream(NamedResource, Resource):
     Description:
         Represents a stream on a stage in Snowflake, which allows for capturing data changes on the stage.
 
+        Snowflake's ALTER STREAM only supports SET/UNSET COMMENT and TAG; it has no way to
+        change the stream's source, so changing on_stage marks the plan for
+        replacement instead of emitting an ALTER. Replacing a stream resets its offset: any
+        change it captured but a consumer hasn't yet read is lost, and the new stream starts
+        tracking from its creation. Drain downstream consumers of the old stream before
+        applying a replacement.
+
     Snowflake Docs:
         https://docs.snowflake.com/en/sql-reference/sql/create-stream
 
     Fields:
         name (string, required): The name of the stream.
-        on_stage (string, required): The name of the stage the stream is based on.
+        on_stage (string, required): The name of the stage the stream is based on. Changing this replaces the stream (see above).
         owner (string or Role): The role that owns the stream. Defaults to "SYSADMIN".
         copy_grants (bool): Whether to copy grants from the source stage to the stream.
         comment (string): An optional description for the stream.
@@ -390,12 +473,36 @@ class StageStream(NamedResource, Resource):
 @dataclass(unsafe_hash=True)
 class _ViewStream(ResourceSpec):
     name: ResourceName
-    on_view: View
+    # Snowflake's ALTER STREAM has no syntax for changing a stream's source -- it only
+    # supports SET/UNSET COMMENT and TAG. A changed on_view has to replace the stream,
+    # which resets its offset: any change the stream captured but a consumer hasn't read
+    # yet is lost, and the new stream starts tracking from its creation.
+    on_view: View = field(
+        metadata={
+            "triggers_replacement": True,
+            "replacement_message": (
+                "Snowflake's ALTER STREAM cannot change a stream's source. Replacing the "
+                "stream resets its offset, so any unread changes are lost. Remove the stream "
+                "from config, apply, then add it back with the new on_view."
+            ),
+        }
+    )
     owner: RoleRef = "SYSADMIN"
     copy_grants: bool = field(default=None, metadata={"fetchable": False})
     at: dict[str, str] = field(default=None, metadata={"fetchable": False})
     before: dict[str, str] = field(default=None, metadata={"fetchable": False})
-    append_only: bool = False
+    # Also fixed at creation -- ALTER STREAM has no way to flip append-only mode either.
+    append_only: bool = field(
+        default=False,
+        metadata={
+            "triggers_replacement": True,
+            "replacement_message": (
+                "Snowflake fixes a stream's append-only mode at creation; ALTER STREAM cannot "
+                "change it. Remove the stream from config, apply, then add it back with the "
+                "new append_only."
+            ),
+        },
+    )
     show_initial_rows: bool = field(default=None, metadata={"fetchable": False})
     comment: str = None
 
@@ -406,17 +513,24 @@ class ViewStream(NamedResource, Resource):
         Represents a stream on a view in Snowflake, allowing for real-time data processing and querying.
         This stream can be configured with various options such as time travel, append-only mode, and initial row visibility.
 
+        Snowflake's ALTER STREAM only supports SET/UNSET COMMENT and TAG; it has no way to
+        change the stream's source, so changing on_view (or append_only,
+        which is likewise fixed at creation) marks the plan for replacement instead of
+        emitting an ALTER. Replacing a stream resets its offset: any change it captured but
+        a consumer hasn't yet read is lost, and the new stream starts tracking from its
+        creation. Drain downstream consumers of the old stream before applying a replacement.
+
     Snowflake Docs:
         https://docs.snowflake.com/en/sql-reference/sql/create-stream
 
     Fields:
         name (string, required): The name of the stream.
-        on_view (string, required): The name of the view the stream is based on.
+        on_view (string, required): The name of the view the stream is based on. Changing this replaces the stream (see above).
         owner (string or Role): The role that owns the stream. Defaults to 'SYSADMIN'.
         copy_grants (bool): Whether to copy grants from the view to the stream.
         at (dict): A dictionary specifying the point in time for the stream to start, using keys like TIMESTAMP, OFFSET, STATEMENT, or STREAM.
         before (dict): A dictionary specifying the point in time for the stream to start, similar to 'at' but defining a point before the specified time.
-        append_only (bool): If set to True, the stream records only append operations.
+        append_only (bool): If set to True, the stream records only append operations. Fixed at creation; changing this replaces the stream.
         show_initial_rows (bool): If set to True, the stream includes the initial rows of the view at the time of stream creation.
         comment (string): An optional description for the stream.
 
