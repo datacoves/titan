@@ -25,7 +25,6 @@ from snowcap.identifiers import parse_URN
 from snowcap.operations.export import EXPORT_ONLY_WHEN_ASKED_FOR, _format_resource_config
 from snowcap.resource_name import ResourceName
 from snowcap.resources.user_key_pair import (
-    key_pair_is_rotated_out,
     normalize_fingerprint,
     normalize_public_key,
     public_key_fingerprint,
@@ -76,6 +75,24 @@ def remote_key_pair(**overrides) -> dict:
     return data
 
 
+def show_key_pair_row(**overrides) -> dict:
+    row = {
+        "name": "MY_KEY",
+        "user_name": "SOME_USER",
+        "fingerprint": PUBLIC_KEY_FINGERPRINT,
+        "role_scope": None,
+        "status": "ACTIVE",
+        "comment": None,
+        "created_on": "2026-08-01 00:00:00",
+        "created_by": "SNOWCAP_SVC",
+        "last_used_on": None,
+        "expires_at": None,
+        "rotated_to": None,
+    }
+    row.update(overrides)
+    return row
+
+
 class TestFingerprint:
     def test_fingerprint_matches_snowflakes_digest(self):
         expected = "SHA256:" + base64.b64encode(hashlib.sha256(base64.b64decode(PUBLIC_KEY)).digest()).decode()
@@ -96,14 +113,59 @@ class TestFingerprint:
         with pytest.raises(ValueError):
             public_key_fingerprint("")
 
+    def test_private_key_pem_is_rejected(self):
+        private_key = "-----BEGIN PRIVATE KEY-----\nYWJj\n-----END PRIVATE KEY-----"
+        with pytest.raises(ValueError, match="private key"):
+            public_key_fingerprint(private_key)
+
+    def test_pkcs1_and_sec1_private_keys_are_rejected(self):
+        # PKCS1 (openssl genrsa's default output) and SEC1 (EC) private keys don't use the
+        # PKCS8 "PRIVATE KEY" label alone -- they carry an algorithm prefix.
+        for label in ("RSA PRIVATE KEY", "EC PRIVATE KEY", "ENCRYPTED PRIVATE KEY"):
+            pem = f"-----BEGIN {label}-----\nYWJj\n-----END {label}-----"
+            with pytest.raises(ValueError, match="private key"):
+                public_key_fingerprint(pem)
+
+    def test_pkcs1_public_key_label_is_still_normalized(self):
+        # RSA PUBLIC KEY (PKCS1) is a different label than PUBLIC KEY (PKCS8/SPKI) and must
+        # still be stripped rather than rejected or left un-normalized.
+        pem = f"-----BEGIN RSA PUBLIC KEY-----\n{PUBLIC_KEY}\n-----END RSA PUBLIC KEY-----"
+        assert normalize_public_key(pem) == PUBLIC_KEY
+
+    def test_a_private_key_with_no_pem_wrapper_is_still_rejected(self):
+        # A private key with its PEM header stripped off has no "PRIVATE KEY" text left for
+        # the substring check to see, so this has to be caught by parsing the DER structure
+        # itself rather than by the label.
+        from cryptography.hazmat.primitives.asymmetric import ec, rsa
+        from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
+
+        rsa_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        rsa_der_b64 = base64.b64encode(
+            rsa_key.private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())
+        ).decode()
+        with pytest.raises(ValueError, match="private key"):
+            public_key_fingerprint(rsa_der_b64)
+
+        ec_key = ec.generate_private_key(ec.SECP256R1())
+        ec_der_b64 = base64.b64encode(
+            ec_key.private_bytes(Encoding.DER, PrivateFormat.TraditionalOpenSSL, NoEncryption())
+        ).decode()
+        with pytest.raises(ValueError, match="private key"):
+            public_key_fingerprint(ec_der_b64)
+
+    def test_a_real_public_key_with_no_pem_wrapper_is_unaffected(self):
+        # The structural check must not false-positive on the common case: a public key
+        # pasted as bare base64, no PEM armor at all.
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048).public_key()
+        der_b64 = base64.b64encode(key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)).decode()
+        assert public_key_fingerprint(der_b64)  # doesn't raise
+
     def test_normalize_fingerprint_accepts_either_form(self):
         assert normalize_fingerprint("wX178b99Nw5LQcMoiREuFn4pdqdJkSbRz9WSSGOm8oU=") == PUBLIC_KEY_FINGERPRINT
         assert normalize_fingerprint(f" {PUBLIC_KEY_FINGERPRINT} ") == PUBLIC_KEY_FINGERPRINT
-
-    def test_rotated_out_names_are_recognized(self):
-        assert key_pair_is_rotated_out("MY_KEY_ROTATED_1755000000000")
-        assert not key_pair_is_rotated_out("MY_KEY")
-        assert not key_pair_is_rotated_out("MY_ROTATED_KEY")
 
 
 class TestUserKeyPair:
@@ -369,25 +431,8 @@ class TestUserKeyPairPlan:
 
 
 class TestUserKeyPairFetch:
-    def _show_row(self, **overrides):
-        row = {
-            "name": "MY_KEY",
-            "user_name": "SOME_USER",
-            "fingerprint": PUBLIC_KEY_FINGERPRINT,
-            "role_scope": None,
-            "status": "ACTIVE",
-            "comment": None,
-            "created_on": "2026-08-01 00:00:00",
-            "created_by": "SNOWCAP_SVC",
-            "last_used_on": None,
-            "expires_at": None,
-            "rotated_to": None,
-        }
-        row.update(overrides)
-        return row
-
     def test_show_output_maps_to_resource_fields(self):
-        assert _user_key_pair_to_dict(self._show_row(role_scope="SOME_ROLE", comment="hi")) == {
+        assert _user_key_pair_to_dict(show_key_pair_row(role_scope="SOME_ROLE", comment="hi")) == {
             "name": "MY_KEY",
             "user": "SOME_USER",
             "fingerprint": PUBLIC_KEY_FINGERPRINT,
@@ -398,35 +443,35 @@ class TestUserKeyPairFetch:
         }
 
     def test_an_expiring_key_pair_reports_that_it_expires(self):
-        row = self._show_row(expires_at="2026-11-01 00:00:00")
+        row = show_key_pair_row(expires_at="2026-11-01 00:00:00")
         assert _user_key_pair_to_dict(row)["has_expiration"] is True
 
     def test_disabled_status(self):
-        assert _user_key_pair_to_dict(self._show_row(status="DISABLED"))["disabled"] is True
+        assert _user_key_pair_to_dict(show_key_pair_row(status="DISABLED"))["disabled"] is True
 
     def test_expired_is_not_disabled(self):
         # Expiration is fixed when the key pair is registered, so an expired key pair is
         # not the `disabled` field drifting. Snowflake reports DISABLED when a key pair is
         # both disabled and expired, so a disabled key never reads back as enabled.
-        assert _user_key_pair_to_dict(self._show_row(status="EXPIRED"))["disabled"] is False
+        assert _user_key_pair_to_dict(show_key_pair_row(status="EXPIRED"))["disabled"] is False
 
     def test_rotated_out_and_reserved_key_pairs_are_not_declarable(self):
-        assert _key_pair_is_declarable(self._show_row())
-        assert not _key_pair_is_declarable(self._show_row(rotated_to="MY_KEY"))
+        assert _key_pair_is_declarable(show_key_pair_row())
+        assert not _key_pair_is_declarable(show_key_pair_row(rotated_to="MY_KEY"))
         # The legacy rsa_public_key / rsa_public_key_2 properties show up under these
         # names; they are managed on the user resource, not as key pairs.
-        assert not _key_pair_is_declarable(self._show_row(name="PUBLIC_KEY_1"))
-        assert not _key_pair_is_declarable(self._show_row(name="PUBLIC_KEY_2"))
+        assert not _key_pair_is_declarable(show_key_pair_row(name="PUBLIC_KEY_1"))
+        assert not _key_pair_is_declarable(show_key_pair_row(name="PUBLIC_KEY_2"))
 
     def test_a_live_key_pair_named_like_a_tombstone_is_still_visible(self):
         # `rotated_to` is what Snowflake sets on a rotated-out key. The generated name is
         # only a convention, and anyone who can register a key pair can imitate it -- if
         # the name were trusted, such a key would be invisible to drift and to sync.
-        row = self._show_row(name="MY_KEY_ROTATED_1755000000000", rotated_to=None)
+        row = show_key_pair_row(name="MY_KEY_ROTATED_1755000000000", rotated_to=None)
         assert _key_pair_is_declarable(row)
 
     def test_fetched_state_round_trips_through_the_spec(self):
-        data = _user_key_pair_to_dict(self._show_row())
+        data = _user_key_pair_to_dict(show_key_pair_row())
         assert res.UserKeyPair.spec(**data).to_dict(AccountEdition.ENTERPRISE) == remote_key_pair()
 
 
@@ -671,29 +716,12 @@ class TestLegacyKeyRotation:
 
 
 class TestUserKeyPairExport:
-    def _show_row(self, **overrides):
-        row = {
-            "name": "MY_KEY",
-            "user_name": "SOME_USER",
-            "fingerprint": PUBLIC_KEY_FINGERPRINT,
-            "role_scope": None,
-            "status": "ACTIVE",
-            "comment": "primary workload key",
-            "created_on": "2026-08-01 00:00:00",
-            "created_by": "SNOWCAP_SVC",
-            "last_used_on": None,
-            "expires_at": None,
-            "rotated_to": None,
-        }
-        row.update(overrides)
-        return row
-
     def test_an_exported_key_pair_loads_once_the_key_is_filled_in(self):
         # Snowflake never returns the key, so the derived fields have to be dropped or the
         # export produces a block the loader refuses outright.
         block = _format_resource_config(
             KEY_PAIR_URN,
-            _user_key_pair_to_dict(self._show_row()),
+            _user_key_pair_to_dict(show_key_pair_row(comment="primary workload key")),
             ResourceType.USER_KEY_PAIR,
         )
         assert "fingerprint" not in block

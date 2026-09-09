@@ -13,6 +13,21 @@ Named key pairs are the recommended alternative to the legacy `rsa_public_key` a
 
 Snowflake never returns the public key itself, only its SHA-256 fingerprint, so Snowcap compares the fingerprint of the configured key against the one Snowflake reports.
 
+## Key storage
+
+A public key is not a secret and is safe to commit with your Snowcap configuration. Keeping it in version control makes rotations reviewable and preserves the key-to-user association. Never put the matching private key in Snowcap configuration or commit it to a repository; keep private keys encrypted in a secret manager or similarly protected storage.
+
+If your organization treats public-key identity as sensitive metadata, inject the public key through Snowcap's existing variable support instead:
+
+```yaml
+user_key_pairs:
+  - name: my_key
+    user: some_user
+    public_key: "{{ var.snowflake_public_key }}"
+```
+
+For local use, `SNOWCAP_VAR_SNOWFLAKE_PUBLIC_KEY` may be loaded from a gitignored `.env` file. This is an organizational policy choice, not a requirement for protecting the public key. See [Secrets and Environment Variables](../secrets-and-variables.md).
+
 ## Examples
 
 ### YAML
@@ -84,7 +99,7 @@ The field describes how the *next* rotation behaves, so changing it on its own p
 * `name` (string, required) - The name of the key pair. `PUBLIC_KEY_1` and `PUBLIC_KEY_2` are reserved by Snowflake for the legacy user properties and cannot be used.
 * `user` (string or [User](user.md), required) - The user the key pair is registered for.
 * `public_key` (string, required) - The public key, with or without PEM delimiters. RSA keys and EC keys on the P-256, P-384, and P-521 curves are supported.
-* `owner` (string or [Role](role.md)) - The role that manages the user, and therefore the role Snowcap runs the `ALTER USER` statements as. Defaults to "USERADMIN".
+* `owner` (string or [Role](role.md)) - The role that manages the user, and therefore the role Snowcap runs create and update statements as. Defaults to "USERADMIN".
 * `role_restriction` (string or [Role](role.md)) - The role a session authenticated with this key pair is restricted to. The role must already be granted to the user.
 * `days_to_expiry` (int) - The number of days the key pair can be used for authentication. Must be 1 or greater. Defaults to no expiration.
 * `expire_rotated_key_pair_after_hours` (int) - How many hours the prior key stays valid after a rotation. `0` revokes it immediately. Defaults to Snowflake's 24 hours. Only applies to a rotation, never to registering a key pair.
@@ -94,5 +109,6 @@ The field describes how the *next* rotation behaves, so changing it on its own p
 ## Notes
 
 * Managing key pairs requires `OWNERSHIP` of the user or the `MODIFY PROGRAMMATIC AUTHENTICATION METHODS` privilege on it.
+* Snowflake does not report which role manages a key pair. If sync mode removes a key pair after its block has been deleted from config, Snowcap cannot recover a custom `owner` and falls back to `USERADMIN` or the connection role. Ensure that role can modify the user, or remove the key pair before deleting its config block.
 * `role_restriction` and `days_to_expiry` are fixed when the key pair is registered. Snowflake offers no way to change them, so Snowcap fails the plan and tells you to remove the key pair, apply, and add it back. That covers a changed `role_restriction`, and an expiration added to or dropped from an existing key pair. A change to the *length* of an existing expiration is not detected, because Snowflake reports an absolute expiration timestamp rather than the relative value that was registered.
 * A key pair past its expiration reports as expired rather than disabled, which Snowcap does not treat as drift on `disabled`.
