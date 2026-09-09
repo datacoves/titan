@@ -671,6 +671,20 @@ class TestCastParamValue:
         with pytest.raises(Exception, match="Unsupported number type"):
             _cast_param_value("not_a_number", "NUMBER")
 
+    def test_float(self):
+        """SHOW PARAMETERS reports INITIAL_REPLICATION_SIZE_LIMIT_IN_TB (and other
+        decimal-valued parameters) with type FLOAT, not NUMBER. Falling through to the
+        raw-string default left the fetched value a str while the YAML-declared value
+        parses to a Python float, so plan compared "10.0" != 10.0 and proposed an UPDATE
+        that never converges."""
+        result = _cast_param_value("10.0", "FLOAT")
+        assert result == 10.0
+        assert isinstance(result, float)
+
+    def test_invalid_float_raises(self):
+        with pytest.raises(Exception, match="Unsupported float type"):
+            _cast_param_value("not_a_float", "FLOAT")
+
 
 class TestParamsResultToDict:
     """Tests for params_result_to_dict helper function."""
@@ -685,6 +699,35 @@ class TestParamsResultToDict:
         assert result["param1"] is True
         assert result["param2"] == 42
         assert result["param3"] == "hello"
+
+
+class TestFetchAccountParameter:
+    """Regression test for the exact reported symptom: `snowcap apply` proposed an UPDATE
+    for INITIAL_REPLICATION_SIZE_LIMIT_IN_TB on every run because SHOW PARAMETERS reports
+    it with type FLOAT, which _cast_param_value didn't handle."""
+
+    @patch("snowcap.data_provider.execute")
+    def test_fetches_float_typed_parameter_as_a_float(self, mock_execute):
+        from snowcap.data_provider import fetch_account_parameter
+        from snowcap.identifiers import FQN
+        from snowcap.resource_name import ResourceName
+
+        mock_execute.return_value = [
+            {
+                "key": "INITIAL_REPLICATION_SIZE_LIMIT_IN_TB",
+                "value": "10.0",
+                "default": "10.0",
+                "level": "ACCOUNT",
+                "type": "FLOAT",
+            }
+        ]
+        fqn = FQN(name=ResourceName("INITIAL_REPLICATION_SIZE_LIMIT_IN_TB"))
+
+        result = fetch_account_parameter(MagicMock(), fqn)
+
+        assert result is not None
+        assert result["value"] == 10.0
+        assert isinstance(result["value"], float)
 
 
 class TestOptionsResultToList:
