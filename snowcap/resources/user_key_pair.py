@@ -21,7 +21,6 @@ __all__ = [
     "FINGERPRINT_PREFIX",
     "RESERVED_KEY_PAIR_NAMES",
     "UserKeyPair",
-    "key_pair_is_rotated_out",
     "normalize_fingerprint",
     "normalize_public_key",
     "public_key_fingerprint",
@@ -38,11 +37,6 @@ RESERVED_KEY_PAIR_NAMES = (ResourceName("PUBLIC_KEY_1"), ResourceName("PUBLIC_KE
 # the `rotated_to` column, never by its name -- so this is only used to keep a config from
 # claiming a name in the namespace Snowflake generates into.
 ROTATED_KEY_PAIR_NAME = re.compile(r"_ROTATED_\d+$")
-
-
-def key_pair_is_rotated_out(name: str) -> bool:
-    """True for a name shaped like the `<name>_ROTATED_<epoch_ms>` a rotation generates."""
-    return ROTATED_KEY_PAIR_NAME.search(name) is not None
 
 
 @dataclass(unsafe_hash=True)
@@ -210,7 +204,7 @@ class UserKeyPair(NamedResource, Resource):
                 f"{self._name} is reserved by Snowflake for the legacy rsa_public_key and "
                 "rsa_public_key_2 user properties. Set those on the user resource instead."
             )
-        if key_pair_is_rotated_out(str(self._name)):
+        if ROTATED_KEY_PAIR_NAME.search(str(self._name)):
             raise ValueError(
                 f"{self._name} names a rotated-out key pair. Snowflake generates those names "
                 "during rotation, so declaring one would collide with a name Snowflake owns."

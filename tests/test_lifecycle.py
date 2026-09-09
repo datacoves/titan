@@ -762,13 +762,15 @@ class TestUpdateDefault:
         result = update__default(urn, data, props)
         assert result == "ALTER WAREHOUSE MY_WH UNSET comment, tag"
 
-    def test_mixed_set_and_unset_raises(self):
+    def test_mixed_set_and_unset_returns_two_statements(self):
         """SET and UNSET cannot share an ALTER statement in Snowflake."""
         urn = make_urn(ResourceType.WAREHOUSE, "MY_WH")
         data = {"size": "LARGE", "comment": None}
         props = MockProps("SIZE = 'LARGE'")
-        with pytest.raises(NotImplementedError, match="mix SET and UNSET"):
-            update__default(urn, data, props)
+        assert update__default(urn, data, props) == [
+            "ALTER WAREHOUSE MY_WH SET SIZE = 'LARGE'",
+            "ALTER WAREHOUSE MY_WH UNSET comment",
+        ]
 
     def test_rename_combined_with_other_fields_raises(self):
         """RENAME TO has its own ALTER syntax and can't combine with SET."""
