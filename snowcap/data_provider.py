@@ -2109,7 +2109,7 @@ def fetch_database_role(session: SnowflakeConnection, fqn: FQN):
     }
 
 
-def _database_role_grantee_fqn(grantee_name: str, default_database: ResourceName) -> FQN:
+def _database_role_grantee_fqn(grantee_name: str, default_database: Optional[ResourceName]) -> FQN:
     """
     Build an FQN for a DATABASE_ROLE grant's grantee.
 
