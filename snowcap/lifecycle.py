@@ -385,17 +385,17 @@ def update_resource(urn: URN, data: dict, props: Props, after: Optional[dict] = 
     The SQL for an update. Most handlers return a single ALTER statement; a handler is
     free to return a list when the change genuinely needs more than one statement.
 
-    `after` is the full desired state of the resource. update_user_key_pair receives it
-    because its delta alone doesn't carry everything the SQL needs -- a key rotation reaches
-    it as a fingerprint change, and the new public key only exists in the desired state.
+    `after` is the full desired state of the resource. Handlers listed in
+    UPDATE_HANDLERS_NEEDING_FULL_STATE receive it because their delta alone doesn't
+    carry everything the SQL needs.
     """
     handler = getattr(__this__, f"update_{urn.resource_label}", update__default)
-    if handler is update_user_key_pair:
+    if handler in UPDATE_HANDLERS_NEEDING_FULL_STATE:
         return handler(urn, data, props, after or {})
     return handler(urn, data, props)
 
 
-def update__default(urn: URN, data: dict, props: Props) -> Union[str, list[str]]:
+def update__default(urn: URN, data: dict, props: Props) -> str:
     # Render every field in the delta into a single ALTER statement.
     # The previous implementation called `data.popitem()` and silently
     # discarded all other fields, so multi-field deltas (e.g. rotating
@@ -427,15 +427,21 @@ def update__default(urn: URN, data: dict, props: Props) -> Union[str, list[str]]
 
     unset_attrs = [attr.lower() for attr, v in data.items() if v is None]
     set_data = {attr: v for attr, v in data.items() if v is not None}
-    commands = []
-    if set_data:
-        commands.append(tidy_sql("ALTER", urn.resource_type, urn.fqn, "SET", props.render(set_data)))
+    if unset_attrs and set_data:
+        # Snowflake rejects mixing SET and UNSET in one ALTER. The caller's
+        # diff layer is expected to keep these in separate change records,
+        # so reaching here means something upstream batched them together.
+        raise NotImplementedError(
+            f"update__default cannot mix SET and UNSET attrs in one ALTER for {urn}; "
+            f"got SET={sorted(set_data.keys())!r} UNSET={sorted(unset_attrs)!r}"
+        )
+
     if unset_attrs:
-        commands.append(tidy_sql("ALTER", urn.resource_type, urn.fqn, "UNSET", ", ".join(unset_attrs)))
-    return commands[0] if len(commands) == 1 else commands
+        return tidy_sql("ALTER", urn.resource_type, urn.fqn, "UNSET", ", ".join(unset_attrs))
+    return tidy_sql("ALTER", urn.resource_type, urn.fqn, "SET", props.render(set_data))
 
 
-def update_masking_policy(urn: URN, data: dict, props: Props) -> Union[str, list[str]]:
+def update_masking_policy(urn: URN, data: dict, props: Props) -> str:
     attr, new_value = data.popitem()
     attr = attr.lower()
     if attr == "body":
@@ -482,12 +488,12 @@ def update_tag_masking_policy_reference(urn: URN, data: dict, props: Props) -> s
     return tidy_sql("ALTER TAG", tag_sql, "UNSET MASKING POLICY", old_masking_policy)
 
 
-def update_event_table(urn: URN, data: dict, props: Props) -> Union[str, list[str]]:
+def update_event_table(urn: URN, data: dict, props: Props) -> str:
     new_urn = URN(ResourceType.TABLE, urn.fqn, urn.account_locator)
     return update__default(new_urn, data, props)
 
 
-def update_procedure(urn: URN, data: dict, props: Props) -> Union[str, list[str]]:
+def update_procedure(urn: URN, data: dict, props: Props) -> str:
     if "execute_as" in data:
         return tidy_sql(
             "ALTER",
@@ -539,7 +545,7 @@ def update_schema(urn: URN, data: dict, props: Props) -> str:
         return tidy_sql("ALTER SCHEMA", urn.fqn, "SET", attr, "=", new_value)
 
 
-def update_table(urn: URN, data: dict, props: Props) -> Union[str, list[str]]:
+def update_table(urn: URN, data: dict, props: Props) -> str:
     attr, new_value = data.popitem()
     attr = attr.lower()
     if attr == "columns":
@@ -553,7 +559,7 @@ def update_table(urn: URN, data: dict, props: Props) -> Union[str, list[str]]:
 # which means that you need to know the current value in order to modify it.
 # This is a problem because we don't have a concept of "current value" for lifecycle updates
 # and so we can't know what value to set.
-def update_task(urn: URN, data: dict, props: Props) -> Union[str, list[str]]:
+def update_task(urn: URN, data: dict, props: Props) -> str:
     # as_ (MODIFY AS), when (MODIFY/REMOVE WHEN), and state (RESUME/SUSPEND) each need
     # bespoke ALTER syntax that can't be combined with a SET, so they must arrive on their
     # own. Everything else flows through update__default, which renders multi-field deltas
@@ -580,7 +586,7 @@ def update_task(urn: URN, data: dict, props: Props) -> Union[str, list[str]]:
     return tidy_sql("ALTER TASK", urn.fqn, change_verb)
 
 
-def update_alert(urn: URN, data: dict, props: Props) -> Union[str, list[str]]:
+def update_alert(urn: URN, data: dict, props: Props) -> str:
     # Alerts, like tasks, reach STARTED via ALTER ALERT ... RESUME rather than a CREATE
     # clause, and RESUME/SUSPEND can't be combined with a SET in one statement. Handle state
     # on its own; delegate every other field to update__default, which renders multi-field
@@ -597,7 +603,7 @@ def update_alert(urn: URN, data: dict, props: Props) -> Union[str, list[str]]:
     return tidy_sql("ALTER ALERT", urn.fqn, change_verb)
 
 
-def update_iceberg_table(urn: URN, data: dict, props: Props) -> Union[str, list[str]]:
+def update_iceberg_table(urn: URN, data: dict, props: Props) -> str:
     attr, new_value = data.popitem()
     attr = attr.lower()
     if attr == "columns":
@@ -640,7 +646,7 @@ def update_user_key_pair(urn: URN, data: dict, props: Props, after: dict) -> lis
             )
         )
 
-    set_data = {attr: data.pop(attr) for attr in ("disabled", "comment") if attr in data and data[attr] is not None}
+    set_data = {attr: data.pop(attr) for attr in ("disabled", "comment") if attr in data}
     if set_data:
         modify_props = Props(disabled=BoolProp("disabled"), comment=StringProp("comment"))
         statements.append(
@@ -653,6 +659,11 @@ def update_user_key_pair(urn: URN, data: dict, props: Props, after: dict) -> lis
         raise NotImplementedError(f"Cannot update {sorted(data.keys())} on {urn}")
 
     return statements
+
+
+# Handlers whose delta doesn't carry everything their SQL needs, so update_resource hands
+# them the full desired state as well.
+UPDATE_HANDLERS_NEEDING_FULL_STATE = (update_user_key_pair,)
 
 
 ################ Drop functions
