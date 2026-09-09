@@ -115,9 +115,7 @@ class TestStreamSourceReplacement:
         with pytest.raises(MarkedForReplacementException, match="append_only"):
             diff(remote_state, after)
 
-    def test_comment_still_updates_in_place(
-        self, session_ctx, stream_cls, source_kwarg, has_append_only, source_sql
-    ):
+    def test_comment_still_updates_in_place(self, session_ctx, stream_cls, source_kwarg, has_append_only, source_sql):
         # comment is the one property Snowflake's ALTER STREAM actually supports changing.
         before = _stream_manifest(session_ctx, stream_cls, source_kwarg, "db.schema.some_source")
         remote_state = _remote_state_from(before)
