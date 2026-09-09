@@ -13,7 +13,7 @@ import re
 
 FINGERPRINT_PREFIX = "SHA256:"
 
-_PEM_DELIMITER = re.compile(r"-{2,}[A-Z ]*-{2,}")
+_PEM_DELIMITER = re.compile(r"-{2,}[A-Za-z ]*-{2,}")
 
 
 def normalize_public_key(public_key: str) -> str:
@@ -53,7 +53,32 @@ def public_key_fingerprint(public_key: str) -> str:
         der = base64.b64decode(key, validate=True)
     except (binascii.Error, ValueError) as err:
         raise ValueError(f"public_key is not valid base64-encoded key material: {err}") from err
+    _reject_if_private_key_der(der)
     return FINGERPRINT_PREFIX + base64.b64encode(hashlib.sha256(der).digest()).decode("utf-8")
+
+
+def _reject_if_private_key_der(der: bytes) -> None:
+    """
+    Catches a private key pasted with its PEM wrapper stripped off, which leaves no
+    "PRIVATE KEY" text for normalize_public_key's check to see. A public key parses as DER
+    SubjectPublicKeyInfo; a private key parses as PKCS1, SEC1, or PKCS8 DER instead -- so
+    trying both tells private from public even with no header to read.
+
+    Garbage that parses as neither is left alone: that's what the base64 check above is
+    for, and Snowflake will reject it at apply time regardless.
+    """
+    from cryptography.hazmat.primitives.serialization import load_der_private_key, load_der_public_key
+
+    try:
+        load_der_public_key(der)
+        return
+    except ValueError:
+        pass
+    try:
+        load_der_private_key(der, password=None)
+    except (ValueError, TypeError):
+        return
+    raise ValueError("public_key contains a private key; provide only the matching public key")
 
 
 def normalize_fingerprint(fingerprint: str) -> str:

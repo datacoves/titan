@@ -132,6 +132,37 @@ class TestFingerprint:
         pem = f"-----BEGIN RSA PUBLIC KEY-----\n{PUBLIC_KEY}\n-----END RSA PUBLIC KEY-----"
         assert normalize_public_key(pem) == PUBLIC_KEY
 
+    def test_a_private_key_with_no_pem_wrapper_is_still_rejected(self):
+        # A private key with its PEM header stripped off has no "PRIVATE KEY" text left for
+        # the substring check to see, so this has to be caught by parsing the DER structure
+        # itself rather than by the label.
+        from cryptography.hazmat.primitives.asymmetric import ec, rsa
+        from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
+
+        rsa_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        rsa_der_b64 = base64.b64encode(
+            rsa_key.private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())
+        ).decode()
+        with pytest.raises(ValueError, match="private key"):
+            public_key_fingerprint(rsa_der_b64)
+
+        ec_key = ec.generate_private_key(ec.SECP256R1())
+        ec_der_b64 = base64.b64encode(
+            ec_key.private_bytes(Encoding.DER, PrivateFormat.TraditionalOpenSSL, NoEncryption())
+        ).decode()
+        with pytest.raises(ValueError, match="private key"):
+            public_key_fingerprint(ec_der_b64)
+
+    def test_a_real_public_key_with_no_pem_wrapper_is_unaffected(self):
+        # The structural check must not false-positive on the common case: a public key
+        # pasted as bare base64, no PEM armor at all.
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048).public_key()
+        der_b64 = base64.b64encode(key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)).decode()
+        assert public_key_fingerprint(der_b64)  # doesn't raise
+
     def test_normalize_fingerprint_accepts_either_form(self):
         assert normalize_fingerprint("wX178b99Nw5LQcMoiREuFn4pdqdJkSbRz9WSSGOm8oU=") == PUBLIC_KEY_FINGERPRINT
         assert normalize_fingerprint(f" {PUBLIC_KEY_FINGERPRINT} ") == PUBLIC_KEY_FINGERPRINT

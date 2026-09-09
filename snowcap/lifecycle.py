@@ -640,6 +640,9 @@ def update_user_key_pair(urn: URN, data: dict, props: Props, after: dict) -> lis
             )
         )
 
+    # The `is not None` guard relies on _diff_resource_data (blueprint.py) never emitting a
+    # None-valued delta entry; if that ever changes, an explicit `comment: None` would need
+    # to become an UNSET COMMENT statement instead of silently vanishing here.
     set_data = {attr: data.pop(attr) for attr in ("disabled", "comment") if attr in data and data[attr] is not None}
     if set_data:
         modify_props = Props(disabled=BoolProp("disabled"), comment=StringProp("comment"))
