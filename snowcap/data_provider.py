@@ -1524,7 +1524,10 @@ def _fetch_grants_from_account_usage(session: SnowflakeConnection) -> list[dict[
 
         # Construct fully qualified name to match SHOW GRANTS output
         # ACCOUNT_USAGE NAME column only has object name, not full path
+        # Same 'DATABASE_ROLE' -> 'DATABASE ROLE' normalization as granted_to above
         granted_on = row["GRANTED_ON"]
+        if granted_on == "DATABASE_ROLE":
+            granted_on = "DATABASE ROLE"
         name = row["NAME"]
         table_catalog = row.get("TABLE_CATALOG")
         table_schema = row.get("TABLE_SCHEMA")
@@ -1539,7 +1542,7 @@ def _fetch_grants_from_account_usage(session: SnowflakeConnection) -> list[dict[
             # Schema grants: need DATABASE.SCHEMA
             if table_catalog:
                 name = f"{table_catalog}.{name}"
-        elif granted_on in ("DATABASE ROLE",):
+        elif granted_on == "DATABASE ROLE":
             # Database role grants: need DATABASE.ROLE
             if table_catalog:
                 name = f"{table_catalog}.{name}"
@@ -2106,12 +2109,37 @@ def fetch_database_role(session: SnowflakeConnection, fqn: FQN):
     }
 
 
+def _database_role_grantee_fqn(grantee_name: str, default_database: ResourceName) -> FQN:
+    """
+    Build an FQN for a DATABASE_ROLE grant's grantee.
+
+    Snowflake reports a database-role grantee unqualified when it lives in the same
+    database as the role granting it, but fully qualified when it's in another database.
+    Parsing it as an FQN and filling in default_database only when it's missing makes both
+    cases comparable to DatabaseRoleGrant.to_database_role's FQN, which is always fully
+    qualified.
+    """
+    grantee_fqn = parse_FQN(grantee_name, is_db_scoped=True)
+    if grantee_fqn.database is None:
+        grantee_fqn.database = default_database
+    return grantee_fqn
+
+
 def fetch_database_role_grant(session: SnowflakeConnection, fqn: FQN):
     show_result = execute(session, f"SHOW GRANTS OF DATABASE ROLE {fqn.database}.{fqn.name}", cacheable=True)
 
     subject, subject_name = next(iter(fqn.params.items()))
 
-    role_grants = _filter_result(show_result, granted_to=subject.upper(), grantee_name=subject_name)
+    if subject == "database_role":
+        target = parse_FQN(subject_name, is_db_scoped=True)
+        role_grants = [
+            row
+            for row in _filter_result(show_result, granted_to=subject.upper())
+            if _database_role_grantee_fqn(row["grantee_name"], fqn.database) == target
+        ]
+    else:
+        role_grants = _filter_result(show_result, granted_to=subject.upper(), grantee_name=subject_name)
+
     if len(role_grants) == 0:
         return None
     if len(role_grants) > 1:
@@ -2124,7 +2152,7 @@ def fetch_database_role_grant(session: SnowflakeConnection, fqn: FQN):
     if data["granted_to"] == "ROLE":
         to_role = _quote_snowflake_identifier(data["grantee_name"])
     elif data["granted_to"] == "DATABASE_ROLE":
-        to_database_role = data["grantee_name"]
+        to_database_role = str(_database_role_grantee_fqn(data["grantee_name"], fqn.database))
 
     return {
         "database_role": data["role"],
@@ -4279,12 +4307,17 @@ def list_database_role_grants(
 
                 # Determine subject based on grantee type
                 subject = "role" if grant["granted_to"] == "ROLE" else "database_role"
+                grantee_name = grant["grantee_name"]
+                if subject == "database_role":
+                    grantee_name = str(
+                        _database_role_grantee_fqn(grantee_name, resource_name_from_snowflake_metadata(db_name))
+                    )
 
                 role_grants.append(
                     FQN(
                         name=resource_name_from_snowflake_metadata(role_name),
                         database=resource_name_from_snowflake_metadata(db_name),
-                        params={subject: grant["grantee_name"]},
+                        params={subject: grantee_name},
                     )
                 )
             # If we got results or no specific database was filtered, return
@@ -4318,11 +4351,16 @@ def list_database_role_grants(
             for data in show_result:
                 subject = "role" if data["granted_to"] == "ROLE" else "database_role"
                 db, name = data["role"].split(".")
+                grantee_name = data["grantee_name"]
+                if subject == "database_role":
+                    grantee_name = str(
+                        _database_role_grantee_fqn(grantee_name, resource_name_from_snowflake_metadata(db))
+                    )
                 role_grants.append(
                     FQN(
                         name=resource_name_from_snowflake_metadata(name),
                         database=resource_name_from_snowflake_metadata(db),
-                        params={subject: data["grantee_name"]},
+                        params={subject: grantee_name},
                     )
                 )
     return role_grants
