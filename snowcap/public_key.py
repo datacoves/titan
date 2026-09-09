@@ -23,8 +23,12 @@ def normalize_public_key(public_key: str) -> str:
     Snowflake's docs are explicit that the public key delimiters are excluded from the
     SQL statement, and DESC USER reports keys that way, so a key pasted straight out of a
     .pub file is accepted here and the `-----BEGIN PUBLIC KEY-----` wrapper and newlines
-    are removed.
+    are removed. Any PEM label containing "PRIVATE KEY" (PKCS1 `RSA PRIVATE KEY`, SEC1
+    `EC PRIVATE KEY`, PKCS8 `PRIVATE KEY`/`ENCRYPTED PRIVATE KEY`) is rejected rather than
+    silently normalized, since that text can't appear in valid base64 key material.
     """
+    if "PRIVATE KEY" in public_key.upper():
+        raise ValueError("public_key contains a private key; provide only the matching public key")
     return "".join(_PEM_DELIMITER.sub("", public_key).split())
 
 
