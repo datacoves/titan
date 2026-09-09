@@ -649,6 +649,11 @@ def _cast_param_value(raw_value: str, param_type: str) -> Any:
                 return float(raw_value)
             except ValueError:
                 raise Exception(f"Unsupported number type: {raw_value}")
+    elif param_type == "FLOAT":
+        try:
+            return float(raw_value)
+        except ValueError:
+            raise Exception(f"Unsupported float type: {raw_value}")
     elif param_type == "STRING":
         return str(raw_value) if raw_value else None
     else:
