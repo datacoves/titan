@@ -2490,6 +2490,251 @@ class TestDatabaseRoleGrantsAreNotListedAsGrants:
         assert not [on for on in on_values if "database_role" in on]
 
 
+class TestDatabaseRoleGrantToDatabaseRole:
+    """Snowflake reports a DATABASE_ROLE grantee unqualified when it's in the same database
+    as the role granting it, but the manifest side always builds a fully qualified
+    DB.ROLE string. Comparing the two directly never matches, so plan re-issues the grant
+    as a no-op CREATE on every run."""
+
+    @patch("snowcap.data_provider.execute")
+    def test_fetch_matches_unqualified_grantee_in_same_database(self, mock_execute):
+        from snowcap.data_provider import fetch_database_role_grant
+        from snowcap.identifiers import FQN
+        from snowcap.resource_name import ResourceName
+
+        mock_execute.return_value = [
+            {
+                "role": "GREAT_BAY_DEV.DR_READER_ROLE",
+                "granted_to": "DATABASE_ROLE",
+                "grantee_name": "DR_WRITER_ROLE",
+                "granted_by": "SECURITYADMIN",
+            }
+        ]
+        fqn = FQN(
+            name=ResourceName("DR_READER_ROLE"),
+            database=ResourceName("GREAT_BAY_DEV"),
+            params={"database_role": "GREAT_BAY_DEV.DR_WRITER_ROLE"},
+        )
+
+        result = fetch_database_role_grant(MagicMock(), fqn)
+
+        assert result is not None
+        assert result["to_database_role"] == "GREAT_BAY_DEV.DR_WRITER_ROLE"
+
+    @patch("snowcap.data_provider.execute")
+    def test_fetch_matches_qualified_grantee_in_another_database(self, mock_execute):
+        from snowcap.data_provider import fetch_database_role_grant
+        from snowcap.identifiers import FQN
+        from snowcap.resource_name import ResourceName
+
+        mock_execute.return_value = [
+            {
+                "role": "GREAT_BAY_DEV.DR_READER_ROLE",
+                "granted_to": "DATABASE_ROLE",
+                "grantee_name": "OTHER_DB.DR_WRITER_ROLE",
+                "granted_by": "SECURITYADMIN",
+            }
+        ]
+        fqn = FQN(
+            name=ResourceName("DR_READER_ROLE"),
+            database=ResourceName("GREAT_BAY_DEV"),
+            params={"database_role": "OTHER_DB.DR_WRITER_ROLE"},
+        )
+
+        result = fetch_database_role_grant(MagicMock(), fqn)
+
+        assert result is not None
+        assert result["to_database_role"] == "OTHER_DB.DR_WRITER_ROLE"
+
+    @patch("snowcap.data_provider.execute")
+    def test_fetch_does_not_false_match_grantee_in_a_different_database(self, mock_execute):
+        """OTHERDB.DR_WRITER_ROLE must not match a target of DB.DR_WRITER_ROLE just because
+        the bare role name is the same."""
+        from snowcap.data_provider import fetch_database_role_grant
+        from snowcap.identifiers import FQN
+        from snowcap.resource_name import ResourceName
+
+        mock_execute.return_value = [
+            {
+                "role": "GREAT_BAY_DEV.DR_READER_ROLE",
+                "granted_to": "DATABASE_ROLE",
+                "grantee_name": "OTHER_DB.DR_WRITER_ROLE",
+                "granted_by": "SECURITYADMIN",
+            }
+        ]
+        fqn = FQN(
+            name=ResourceName("DR_READER_ROLE"),
+            database=ResourceName("GREAT_BAY_DEV"),
+            params={"database_role": "GREAT_BAY_DEV.DR_WRITER_ROLE"},
+        )
+
+        assert fetch_database_role_grant(MagicMock(), fqn) is None
+
+    @patch("snowcap.data_provider.execute")
+    def test_fetch_regression_grant_to_account_role(self, mock_execute):
+        from snowcap.data_provider import fetch_database_role_grant
+        from snowcap.identifiers import FQN
+        from snowcap.resource_name import ResourceName
+
+        mock_execute.return_value = [
+            {
+                "role": "GREAT_BAY_DEV.DR_READER_ROLE",
+                "granted_to": "ROLE",
+                "grantee_name": "GREAT_BAY_DEV__READER",
+                "granted_by": "SECURITYADMIN",
+            }
+        ]
+        fqn = FQN(
+            name=ResourceName("DR_READER_ROLE"),
+            database=ResourceName("GREAT_BAY_DEV"),
+            params={"role": "GREAT_BAY_DEV__READER"},
+        )
+
+        result = fetch_database_role_grant(MagicMock(), fqn)
+
+        assert result is not None
+        assert result["to_role"] == "GREAT_BAY_DEV__READER"
+
+    @patch("snowcap.data_provider._should_use_account_usage")
+    @patch("snowcap.data_provider.execute")
+    def test_list_show_path_qualifies_same_database_grantee(self, mock_execute, mock_should_use):
+        from snowcap.data_provider import list_database_role_grants
+
+        mock_should_use.return_value = False
+
+        def execute_side_effect(session, query, **kwargs):
+            if "SHOW DATABASE ROLES IN DATABASE" in query:
+                return [{"name": "DR_READER_ROLE"}]
+            if "SHOW GRANTS OF DATABASE ROLE" in query:
+                return [
+                    {
+                        "role": "GREAT_BAY_DEV.DR_READER_ROLE",
+                        "granted_to": "DATABASE_ROLE",
+                        "grantee_name": "DR_WRITER_ROLE",
+                        "granted_by": "SECURITYADMIN",
+                    }
+                ]
+            raise AssertionError(f"unexpected query: {query}")
+
+        mock_execute.side_effect = execute_side_effect
+
+        grants = list_database_role_grants(MagicMock(), database="GREAT_BAY_DEV")
+
+        assert len(grants) == 1
+        assert grants[0].params == {"database_role": "GREAT_BAY_DEV.DR_WRITER_ROLE"}
+
+    @patch("snowcap.data_provider._should_use_account_usage")
+    @patch("snowcap.data_provider.execute")
+    def test_list_account_usage_path_recognizes_underscore_granted_on(self, mock_execute, mock_should_use):
+        """SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES spells the object type GRANTED_ON =
+        'DATABASE_ROLE' (underscore). _fetch_grants_from_account_usage must normalize that
+        to 'DATABASE ROLE' (matching SHOW GRANTS) or list_database_role_grants's filter on
+        granted_on never matches and this path always returns zero results."""
+        from datetime import datetime
+
+        from snowcap.data_provider import list_database_role_grants
+
+        mock_should_use.return_value = True
+        mock_execute.return_value = [
+            {
+                "CREATED_ON": datetime(2024, 1, 1),
+                "PRIVILEGE": "USAGE",
+                "GRANTED_ON": "DATABASE_ROLE",
+                "NAME": "DR_READER_ROLE",
+                "TABLE_CATALOG": "GREAT_BAY_DEV",
+                "GRANTED_TO": "DATABASE_ROLE",
+                "GRANTEE_NAME": "DR_WRITER_ROLE",
+                "GRANT_OPTION": False,
+                "GRANTED_BY": "SECURITYADMIN",
+            }
+        ]
+
+        grants = list_database_role_grants(MagicMock(), database="GREAT_BAY_DEV", use_account_usage=True)
+
+        assert len(grants) == 1
+        assert grants[0].params == {"database_role": "GREAT_BAY_DEV.DR_WRITER_ROLE"}
+
+    def test_account_usage_and_show_paths_return_identical_fqns(self):
+        """The two list paths are interchangeable sources for the same diff, so they must
+        agree on the FQN they produce for the same underlying grant."""
+        from snowcap.data_provider import list_database_role_grants
+
+        au_row = {
+            "privilege": "USAGE",
+            "granted_on": "DATABASE ROLE",  # as normalized by _fetch_grants_from_account_usage
+            "name": "GREAT_BAY_DEV.DR_READER_ROLE",
+            "granted_to": "DATABASE_ROLE",
+            "grantee_name": "DR_WRITER_ROLE",
+        }
+        show_row = {
+            "role": "GREAT_BAY_DEV.DR_READER_ROLE",
+            "granted_to": "DATABASE_ROLE",
+            "grantee_name": "DR_WRITER_ROLE",
+            "granted_by": "SECURITYADMIN",
+        }
+
+        with (
+            patch("snowcap.data_provider._should_use_account_usage", return_value=True),
+            patch("snowcap.data_provider._fetch_grants_from_account_usage", return_value=[au_row]),
+        ):
+            au_grants = list_database_role_grants(MagicMock(), database="GREAT_BAY_DEV", use_account_usage=True)
+
+        def show_side_effect(session, query, **kwargs):
+            if "SHOW DATABASE ROLES IN DATABASE" in query:
+                return [{"name": "DR_READER_ROLE"}]
+            if "SHOW GRANTS OF DATABASE ROLE" in query:
+                return [show_row]
+            raise AssertionError(f"unexpected query: {query}")
+
+        with (
+            patch("snowcap.data_provider._should_use_account_usage", return_value=False),
+            patch("snowcap.data_provider.execute", side_effect=show_side_effect),
+        ):
+            show_grants = list_database_role_grants(MagicMock(), database="GREAT_BAY_DEV")
+
+        assert len(au_grants) == 1
+        assert len(show_grants) == 1
+        assert au_grants[0] == show_grants[0]
+        assert au_grants[0].params == {"database_role": "GREAT_BAY_DEV.DR_WRITER_ROLE"}
+
+    def test_fetched_grant_matches_declared_manifest_fqn(self):
+        """The actual reported symptom: plan compares the fetched FQN against the FQN the
+        manifest builds for the same declared grant. They must be equal, or plan proposes a
+        CREATE for a grant that already exists."""
+        from snowcap import resources as res
+        from snowcap.resources.grant import database_role_grant_fqn
+        from snowcap.data_provider import list_database_role_grants
+
+        grant = res.DatabaseRoleGrant(
+            database_role="great_bay_dev.dr_reader_role",
+            to_database_role="great_bay_dev.dr_writer_role",
+        )
+        declared_fqn = database_role_grant_fqn(grant._data)
+
+        def show_side_effect(session, query, **kwargs):
+            if "SHOW DATABASE ROLES IN DATABASE" in query:
+                return [{"name": "DR_READER_ROLE"}]
+            if "SHOW GRANTS OF DATABASE ROLE" in query:
+                return [
+                    {
+                        "role": "GREAT_BAY_DEV.DR_READER_ROLE",
+                        "granted_to": "DATABASE_ROLE",
+                        "grantee_name": "DR_WRITER_ROLE",
+                        "granted_by": "SECURITYADMIN",
+                    }
+                ]
+            raise AssertionError(f"unexpected query: {query}")
+
+        with (
+            patch("snowcap.data_provider._should_use_account_usage", return_value=False),
+            patch("snowcap.data_provider.execute", side_effect=show_side_effect),
+        ):
+            fetched_grants = list_database_role_grants(MagicMock(), database="GREAT_BAY_DEV")
+
+        assert len(fetched_grants) == 1
+        assert fetched_grants[0] == declared_fqn
+
+
 class TestGrantsReportedUnderASynonym:
     """Snowflake reports a grant on an MCP server as CORTEX_AGENT_SERVER, while GRANT and
     CREATE call the object an MCP SERVER. Remote state and the manifest have to identify it
