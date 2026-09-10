@@ -27,6 +27,10 @@ __this__ = sys.modules[__name__]
 def quote_value(value: str):
     if value is None or value == "":
         return "''"
+    if "$$" in str(value):
+        # JSON and Snowflake share backslash escape syntax for control characters
+        escaped = json.dumps(str(value), ensure_ascii=False)[1:-1].replace("'", "''")
+        return f"'{escaped}'"
     return f"$${value}$$"
 
 

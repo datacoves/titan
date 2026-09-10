@@ -937,6 +937,22 @@ class TestUpdateSchema:
         result = update_schema(urn, data, props)
         assert "SET data_retention_time_in_days = 7" in result
 
+    def test_set_comment_with_apostrophe(self):
+        """A comment containing an apostrophe must not break out of the literal."""
+        urn = make_urn(ResourceType.SCHEMA, "MY_SCHEMA", database="MY_DB")
+        data = {"comment": "the database's two-limb test"}
+        props = MockProps("")
+        result = update_schema(urn, data, props)
+        assert result == "ALTER SCHEMA MY_DB.MY_SCHEMA SET comment = $$the database's two-limb test$$"
+
+    def test_set_comment_containing_dollar_quote(self):
+        """A comment containing $$ falls back to a single-quoted literal."""
+        urn = make_urn(ResourceType.SCHEMA, "MY_SCHEMA", database="MY_DB")
+        data = {"comment": "costs $$ and it's dear"}
+        props = MockProps("")
+        result = update_schema(urn, data, props)
+        assert result == "ALTER SCHEMA MY_DB.MY_SCHEMA SET comment = 'costs $$ and it''s dear'"
+
 
 class TestUpdateTable:
     """Tests for update_table function."""

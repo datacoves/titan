@@ -6,7 +6,7 @@ from inflection import pluralize
 from .builder import tidy_sql
 from .enums import GrantType, ResourceType
 from .identifiers import FQN, URN
-from .props import BoolProp, IntProp, Props, StringProp
+from .props import BoolProp, IntProp, Props, StringProp, quote_value
 from .resource_name import ResourceName
 
 __this__ = sys.modules[__name__]
@@ -535,7 +535,7 @@ def update_schema(urn: URN, data: dict, props: Props) -> str:
     elif attr == "managed_access":
         return tidy_sql("ALTER SCHEMA", urn.fqn, "ENABLE" if new_value else "DISABLE", "MANAGED ACCESS")
     else:
-        new_value = f"'{new_value}'" if isinstance(new_value, str) else new_value
+        new_value = quote_value(new_value) if isinstance(new_value, str) else new_value
         return tidy_sql("ALTER SCHEMA", urn.fqn, "SET", attr, "=", new_value)
 
 
