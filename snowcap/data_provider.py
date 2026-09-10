@@ -3854,12 +3854,11 @@ def fetch_user(
 
     user_type = properties["type"].upper()
 
-    display_name = None
-    login_name = None
+    display_name = data["display_name"] or None
+    login_name = data["login_name"] or None
+    # SERVICE users do not report must_change_password.
     must_change_password = None
     if user_type != "SERVICE":
-        display_name = data["display_name"]
-        login_name = data["login_name"]
         must_change_password = data["must_change_password"] == "true"
 
     rsa_public_key = properties["rsa_public_key"] if properties["rsa_public_key"] != "null" else None

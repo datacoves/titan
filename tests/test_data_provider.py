@@ -49,6 +49,7 @@ from snowcap.data_provider import (
     fetch_shared_database,
     fetch_security_integration,
     fetch_task,
+    fetch_user,
     fetch_warehouse,
     fetch_streamlit,
     list_resource,
@@ -3656,3 +3657,82 @@ class TestSchemaScopedListersUseAccountUsage:
         lister(MagicMock(), use_account_usage=False)
 
         assert mock_from_account_usage.call_args.kwargs["use_account_usage"] is False
+
+
+def _show_users_row(**overrides):
+    row = {
+        "name": "SOME_USER",
+        "login_name": "SOME_USER",
+        "display_name": "Some User",
+        "first_name": "",
+        "last_name": "",
+        "email": "",
+        "comment": "",
+        "disabled": "false",
+        "must_change_password": "false",
+        "default_warehouse": "",
+        "default_namespace": "",
+        "default_role": "",
+        "default_secondary_roles": "",
+        "owner": "USERADMIN",
+        "owner_role_type": "ROLE",
+    }
+    row.update(overrides)
+    return row
+
+
+def _desc_user_rows(user_type="PERSON"):
+    return [
+        {"property": "TYPE", "value": user_type},
+        {"property": "RSA_PUBLIC_KEY", "value": "null"},
+        {"property": "MIDDLE_NAME", "value": "null"},
+    ]
+
+
+class TestFetchUserServiceFields:
+    @pytest.mark.parametrize("user_type", ["SERVICE", "LEGACY_SERVICE", "PERSON"])
+    @patch("snowcap.data_provider.execute")
+    @patch("snowcap.data_provider._show_users")
+    def test_login_name_and_display_name_are_read_for_every_user_type(self, mock_show, mock_execute, user_type):
+        mock_show.return_value = [_show_users_row(login_name="SVC_LOGIN", display_name="Service Account")]
+        mock_execute.return_value = _desc_user_rows(user_type)
+
+        data = fetch_user(MagicMock(), FQN(name=ResourceName("SOME_USER")), include_params=False)
+
+        assert data["login_name"] == "SVC_LOGIN"
+        assert data["display_name"] == "Service Account"
+
+    @patch("snowcap.data_provider.execute")
+    @patch("snowcap.data_provider._show_users")
+    def test_must_change_password_stays_none_for_a_service_user(self, mock_show, mock_execute):
+        # Snowflake does not report it for TYPE = SERVICE, so it is the one field that has to
+        # be dropped rather than compared.
+        mock_show.return_value = [_show_users_row(must_change_password="false")]
+        mock_execute.return_value = _desc_user_rows("SERVICE")
+
+        data = fetch_user(MagicMock(), FQN(name=ResourceName("SOME_USER")), include_params=False)
+
+        assert data["must_change_password"] is None
+
+    @patch("snowcap.data_provider.execute")
+    @patch("snowcap.data_provider._show_users")
+    def test_must_change_password_is_still_read_for_a_person(self, mock_show, mock_execute):
+        mock_show.return_value = [_show_users_row(must_change_password="true")]
+        mock_execute.return_value = _desc_user_rows("PERSON")
+
+        data = fetch_user(MagicMock(), FQN(name=ResourceName("SOME_USER")), include_params=False)
+
+        assert data["must_change_password"] is True
+
+    @patch("snowcap.data_provider.execute")
+    @patch("snowcap.data_provider._show_users")
+    def test_an_empty_login_name_reads_as_none(self, mock_show, mock_execute):
+        # "" and None are different to diff(), so an empty string would report as drift
+        # against a config that omits the field.
+        mock_show.return_value = [_show_users_row(login_name="", display_name="")]
+        mock_execute.return_value = _desc_user_rows("SERVICE")
+
+        data = fetch_user(MagicMock(), FQN(name=ResourceName("SOME_USER")), include_params=False)
+
+        assert data["login_name"] is None
+        assert data["display_name"] is None
